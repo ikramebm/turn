@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Streaming ESP32-CAM</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            text-align: center;
+        }
+        #videoStream {
+            max-width: 100%;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+        }
+        button {
+            margin: 0 10px;
+            padding: 10px 15px;
+        }
+        #startStream {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        #stopStream {
+            background-color: #f44336;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        #ipInfo {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Récepteur de Flux Vidéo</h1>
+    <div id="ipInfo">
+        <p>Vérification de l'adresse IP publique...</p>
+    </div>
+    <div>
+        <button id="startStream">Démarrer Stream</button>
+        <button id="stopStream" disabled>Arrêter Stream</button>
+        <video id="videoStream" width="640" height="480" autoplay></video>
+    </div>
+
+    <script>
+        // Configuration UDP
+        const UDP_PORT = 12345;
+
+        // Vérification de l'IP publique
+        fetch('https://api.ipify.org?format=json')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('ipInfo').innerHTML = `
+                    <p>IP publique: ${data.ip}</p>
+                    <p>Port UDP: ${UDP_PORT}</p>
+                `;
+            })
+            .catch(error => {
+                document.getElementById('ipInfo').innerHTML = `
+                    <p>Erreur lors de la récupération de l'IP publique</p>
+                    <p>Port UDP: ${UDP_PORT}</p>
+                `;
+            });
+
+        const ice_servers = {
+            urls: ['turn:ikrame-s-websocket-server.glitch.me:3478'],
+            username: "admin",
+            credential: "admin"
+        };
+
+        const socket = new WebSocket('wss://ikrame-s-websocket-server.glitch.me');
+        let peerConnection = null;
+        const videoElement = document.getElementById('videoStream');
+        const startButton = document.getElementById('startStream');
+        const stopButton = document.getElementById('stopStream');
+
+        socket.onopen = () => {
+            socket.send(JSON.stringify({
+                type: 'register-web',
+                udpPort: UDP_PORT
+            }));
+        };
+
+        startButton.addEventListener('click', () => {
+            console.log('Démarrage du stream demandé');
+            initializePeerConnection();
+            socket.send(JSON.stringify({type: 'start-stream'}));
+            startButton.disabled = true;
+            stopButton.disabled = false;
+        });
+
+        stopButton.addEventListener('click', () => {
+            socket.send(JSON.stringify({type: 'stop-stream'}));
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            videoElement.srcObject = null;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+        });
+
+        function initializePeerConnection() {
+            if (peerConnection) {
+                peerConnection.close();
+            }
+
+            peerConnection = new RTCPeerConnection({
+                iceServers: [ice_servers]
+            });
+
+            peerConnection.ontrack = (event) => {
+                console.log('Track reçu:', event);
+                videoElement.srcObject = event.streams[0];
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.send(JSON.stringify({
+                        type: 'webrtc-ice-candidate',
+                        candidate: event.candidate
+                    }));
+                }
+            };
+
+            peerConnection.oniceconnectionstatechange = () => {
+                if (peerConnection.iceConnectionState === 'disconnected') {
+                    videoElement.srcObject = null;
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                }
+            };
+        }
+
+        socket.addEventListener('message', async (event) => {
+            const message = JSON.parse(event.data);
+            console.log('Message reçu:', message);
+
+            if (message.type === 'webrtc-offer') {
+                if (!peerConnection) {
+                    initializePeerConnection();
+                }
+                
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                socket.send(JSON.stringify({
+                    type: 'webrtc-answer',
+                    answer: answer
+                }));
+            } 
+            else if (message.type === 'webrtc-ice-candidate' && message.candidate) {
+                try {
+                    if (peerConnection) {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                    }
+                } catch (error) {
+                    console.error('Erreur lors de l\'ajout du candidat ICE:', error);
+                }
+            }
+        });
+    </script>
+</body>
+</html>
